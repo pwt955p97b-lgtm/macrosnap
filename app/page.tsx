@@ -89,18 +89,26 @@ export default function Home() {
   ];
 
   useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed: unknown = JSON.parse(raw);
-        if (Array.isArray(parsed)) setMeals(parsed.filter((m): m is Meal =>
-          m !== null && typeof m === "object" && typeof m.id === "string" &&
-          typeof m.name === "string" && typeof m.loggedAt === "string" &&
-          ["calories","protein","carbs","fat"].every(k => typeof (m as Record<string, unknown>)[k] === "number" && Number.isFinite((m as Record<string, number>)[k]) && (m as Record<string, number>)[k] >= 0)
-        ));
-      }
-    } catch { setNotice("Saved meals couldn't be loaded on this device."); }
-    setLoaded(true);
+    let active = true;
+
+    queueMicrotask(() => {
+      if (!active) return;
+
+      try {
+        const raw = window.localStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          const parsed: unknown = JSON.parse(raw);
+          if (Array.isArray(parsed)) setMeals(parsed.filter((m): m is Meal =>
+            m !== null && typeof m === "object" && typeof m.id === "string" &&
+            typeof m.name === "string" && typeof m.loggedAt === "string" &&
+            ["calories","protein","carbs","fat"].every(k => typeof (m as Record<string, unknown>)[k] === "number" && Number.isFinite((m as Record<string, number>)[k]) && (m as Record<string, number>)[k] >= 0)
+          ));
+        }
+      } catch { setNotice("Saved meals couldn't be loaded on this device."); }
+      setLoaded(true);
+    });
+
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
