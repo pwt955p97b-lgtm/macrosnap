@@ -96,7 +96,7 @@ export default function Home() {
         if (Array.isArray(parsed)) setMeals(parsed.filter((m): m is Meal =>
           m !== null && typeof m === "object" && typeof m.id === "string" &&
           typeof m.name === "string" && typeof m.loggedAt === "string" &&
-          ["calories","protein","carbs","fat"].every(k => typeof m[k] === "number" && Number.isFinite(m[k]) && m[k] >= 0)
+          ["calories","protein","carbs","fat"].every(k => typeof (m as Record<string, unknown>)[k] === "number" && Number.isFinite((m as Record<string, number>)[k]) && (m as Record<string, number>)[k] >= 0)
         ));
       }
     } catch { setNotice("Saved meals couldn't be loaded on this device."); }
