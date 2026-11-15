@@ -16,6 +16,10 @@ import {
   X,
 } from "lucide-react";
 
+type Meal = { id: string; name: string; calories: number; protein: number; carbs: number; fat: number; loggedAt: string };
+const STORAGE_KEY = "macrosnap-meals-v1";
+const goals = { calories: 2400, protein: 165, carbs: 270, fat: 72 };
+
 type Macro = {
   label: string;
   value: number;
@@ -23,17 +27,7 @@ type Macro = {
   color: string;
 };
 
-const mealMacros: Macro[] = [
-  { label: "Protein", value: 42, unit: "g", color: "#9d79ef" },
-  { label: "Carbs", value: 58, unit: "g", color: "#e9a23b" },
-  { label: "Fat", value: 18, unit: "g", color: "#ee7291" },
-];
 
-const dayMacros = [
-  { label: "Protein", current: 96, goal: 140, unit: "g", color: "#9d79ef" },
-  { label: "Carbs", current: 164, goal: 230, unit: "g", color: "#e9a23b" },
-  { label: "Fat", current: 49, goal: 70, unit: "g", color: "#ee7291" },
-];
 
 function ProgressRing({ value, max }: { value: number; max: number }) {
   const radius = 47;
@@ -54,7 +48,7 @@ function ProgressRing({ value, max }: { value: number; max: number }) {
         />
       </svg>
       <div className="ring-label">
-        <strong>{max - value}</strong>
+        <strong>{Math.max(0, max - value)}</strong>
         <span>kcal left</span>
       </div>
     </div>
@@ -68,6 +62,67 @@ export default function Home() {
   const [dragging, setDragging] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzed, setAnalyzed] = useState(false);
+  const [meals, setMeals] = useState<Meal[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [mealName, setMealName] = useState("");
+  const [calories, setCalories] = useState("0");
+  const [protein, setProtein] = useState("0");
+  const [carbs, setCarbs] = useState("0");
+  const [fat, setFat] = useState("0");
+  const [notice, setNotice] = useState("");
+
+  const today = new Date().toLocaleDateString("en-CA");
+  const todaysMeals = meals.filter((meal) => new Date(meal.loggedAt).toLocaleDateString("en-CA") === today);
+  const totals = todaysMeals.reduce((a, m) => ({
+    calories: a.calories + m.calories, protein: a.protein + m.protein,
+    carbs: a.carbs + m.carbs, fat: a.fat + m.fat
+  }), { calories: 0, protein: 0, carbs: 0, fat: 0 });
+  const dayMacros = [
+    { label: "Protein", current: totals.protein, goal: goals.protein, unit: "g", color: "#9d79ef" },
+    { label: "Carbs", current: totals.carbs, goal: goals.carbs, unit: "g", color: "#e9a23b" },
+    { label: "Fat", current: totals.fat, goal: goals.fat, unit: "g", color: "#ee7291" }
+  ];
+  const mealMacros: Macro[] = [
+    { label: "Protein", value: Number(protein) || 0, unit: "g", color: "#9d79ef" },
+    { label: "Carbs", value: Number(carbs) || 0, unit: "g", color: "#e9a23b" },
+    { label: "Fat", value: Number(fat) || 0, unit: "g", color: "#ee7291" }
+  ];
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed: unknown = JSON.parse(raw);
+        if (Array.isArray(parsed)) setMeals(parsed.filter((m): m is Meal =>
+          m !== null && typeof m === "object" && typeof m.id === "string" &&
+          typeof m.name === "string" && typeof m.loggedAt === "string" &&
+          ["calories","protein","carbs","fat"].every(k => typeof m[k] === "number" && Number.isFinite(m[k]) && m[k] >= 0)
+        ));
+      }
+    } catch { setNotice("Saved meals couldn't be loaded on this device."); }
+    setLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (loaded) {
+      try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(meals)); }
+      catch { /* Storage may be disabled or full. */ }
+    }
+  }, [loaded, meals]);
+
+  function logMeal() {
+    const values = [calories, protein, carbs, fat].map(Number);
+    if (!mealName.trim() || values.some(v => !Number.isFinite(v) || v < 0)) {
+      setNotice("Add a meal name and valid, nonnegative nutrition values.");
+      return;
+    }
+    setMeals(prev => [{ id: crypto.randomUUID(), name: mealName.trim(), calories: values[0], protein: values[1], carbs: values[2], fat: values[3], loggedAt: new Date().toISOString() }, ...prev]);
+    setNotice("Meal added to today's diary.");
+  }
+  function removeMeal(id: string) {
+    setMeals(prev => prev.filter(m => m.id !== id));
+    setNotice("Meal removed.");
+  }
 
   useEffect(() => {
     return () => {
@@ -81,6 +136,7 @@ export default function Home() {
     setPreview(URL.createObjectURL(file));
     setFileName(file.name);
     setAnalyzed(false);
+    setNotice("");
   }
 
   function onInput(event: ChangeEvent<HTMLInputElement>) {
@@ -103,10 +159,12 @@ export default function Home() {
 
   function analyzePhoto() {
     setAnalyzing(true);
-    window.setTimeout(() => {
-      setAnalyzing(false);
-      setAnalyzed(true);
-    }, 900);
+    // AI analysis is not connected yet: show an editable manual entry instead.
+    setMealName("");
+    setCalories("0"); setProtein("0"); setCarbs("0"); setFat("0");
+    setAnalyzed(true);
+    setAnalyzing(false);
+    setNotice("AI photo analysis is coming next. Enter your meal estimates to save it.");
   }
 
   return (
@@ -117,8 +175,8 @@ export default function Home() {
             <span className="brand-mark"><Leaf size={20} strokeWidth={2.6} /></span>
             <span>MacroSnap</span>
           </a>
-          <div className="streak"><Flame size={17} fill="currentColor" /> 6 day streak</div>
-          <button className="avatar" aria-label="Open profile">AM</button>
+          <div className="streak"><Flame size={17} fill="currentColor" /> My food diary</div>
+          <span className="avatar" aria-label="Profile placeholder">MS</span>
         </div>
       </header>
 
@@ -131,7 +189,7 @@ export default function Home() {
           </div>
           <div className="date-chip">
             <span>Today</span>
-            <strong>November 1</strong>
+            <strong suppressHydrationWarning>{new Date().toLocaleDateString("en-US", { month: "long", day: "numeric" })}</strong>
           </div>
         </section>
 
@@ -175,7 +233,7 @@ export default function Home() {
 
             {preview && (
               <button className="analyze-button" onClick={analyzePhoto} disabled={analyzing}>
-                <ScanLine size={19} /> {analyzing ? "Analyzing your meal…" : analyzed ? "Analyze again" : "Analyze meal"}
+                <ScanLine size={19} /> {analyzing ? "Preparing…" : analyzed ? "Reset estimate" : "Enter nutrition"}
               </button>
             )}
           </section>
@@ -192,11 +250,20 @@ export default function Home() {
             <div className={`result-content ${analyzed ? "fresh-result" : ""}`}>
               <div className="meal-title">
                 <span className="meal-icon"><Utensils size={21} /></span>
-                <div><strong>Grilled chicken grain bowl</strong><span>Estimated serving · 485 g</span></div>
+                <div><strong>{analyzed ? "Log your meal" : "No meal selected yet"}</strong><span>{analyzed ? "Enter nutrition manually · AI coming soon" : "Choose a photo to get started"}</span></div>
               </div>
+              {analyzed && <div className="entry-fields">
+                <label>Meal name<input value={mealName} maxLength={100} onChange={e => setMealName(e.target.value)} placeholder="e.g. Grilled chicken and rice" /></label>
+                <div className="entry-numbers">
+                  <label>Calories<input type="number" min="0" step="1" value={calories} onChange={e => setCalories(e.target.value)} /></label>
+                  <label>Protein (g)<input type="number" min="0" step="0.1" value={protein} onChange={e => setProtein(e.target.value)} /></label>
+                  <label>Carbs (g)<input type="number" min="0" step="0.1" value={carbs} onChange={e => setCarbs(e.target.value)} /></label>
+                  <label>Fat (g)<input type="number" min="0" step="0.1" value={fat} onChange={e => setFat(e.target.value)} /></label>
+                </div>
+              </div>}
               <div className="calorie-total">
                 <span><Flame size={20} fill="currentColor" /> Calories</span>
-                <strong>562 <small>kcal</small></strong>
+                <strong>{analyzed ? (Number(calories) || 0) : "—"} <small>kcal</small></strong>
               </div>
               <div className="macro-row">
                 {mealMacros.map((macro) => (
@@ -206,12 +273,9 @@ export default function Home() {
                   </div>
                 ))}
               </div>
-              <div className="ingredients">
-                <p>What we found</p>
-                <div><span>Grilled chicken</span><span>Brown rice</span><span>Avocado</span><span>Greens</span></div>
-              </div>
-              <button className="log-button"><Plus size={18} /> Add to today&apos;s log</button>
-              <p className="mock-note"><Sparkles size={13} /> Prototype estimate using sample data</p>
+              <button className="log-button" onClick={logMeal} disabled={!analyzed || !loaded}><Plus size={18} /> Add to today&apos;s log</button>
+              <p className="mock-note"><Sparkles size={13} /> Manual nutrition entry · no AI estimate yet</p>
+              {notice && <p className="entry-notice" role="status">{notice}</p>}
             </div>
           </section>
         </div>
@@ -219,17 +283,17 @@ export default function Home() {
         <section className="daily-section" aria-labelledby="daily-title">
           <div className="section-title">
             <div><p className="eyebrow"><Target size={15} /> Daily progress</p><h2 id="daily-title">Your macros today</h2></div>
-            <button className="text-button">View diary <ChevronRight size={17} /></button>
+            <a className="text-button" href="#diary">View diary <ChevronRight size={17} /></a>
           </div>
 
           <div className="daily-card">
             <div className="calorie-summary">
-              <ProgressRing value={1428} max={2100} />
-              <div className="calorie-copy"><span>Calories eaten</span><strong>1,428 <small>/ 2,100 kcal</small></strong><p>You&apos;re right on track for today.</p></div>
+              <ProgressRing value={totals.calories} max={goals.calories} />
+              <div className="calorie-copy"><span>Calories eaten</span><strong>{Math.round(totals.calories).toLocaleString()} <small>/ {goals.calories.toLocaleString()} kcal</small></strong><p>Based on meals logged today.</p></div>
             </div>
             <div className="macro-progress-list">
               {dayMacros.map((macro) => {
-                const percent = Math.round((macro.current / macro.goal) * 100);
+                const percent = Math.min(100, Math.round((macro.current / macro.goal) * 100));
                 return (
                   <div className="progress-item" key={macro.label}>
                     <div className="progress-label"><span><i style={{ background: macro.color }} />{macro.label}</span><strong>{macro.current}<small> / {macro.goal}{macro.unit}</small></strong></div>
@@ -241,11 +305,12 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="recent-section">
-          <div className="section-title compact"><div><p className="eyebrow">Today&apos;s log</p><h2>Recent meals</h2></div><button className="add-meal"><Plus size={17} /> Add meal</button></div>
+        <section className="recent-section" id="diary">
+          <div className="section-title compact"><div><p className="eyebrow">Today&apos;s log</p><h2>Recent meals</h2></div><button className="add-meal" onClick={() => { setAnalyzed(true); setMealName(""); setCalories("0"); setProtein("0"); setCarbs("0"); setFat("0"); document.getElementById("result-title")?.scrollIntoView({ behavior: "smooth" }); }}><Plus size={17} /> Add meal</button></div>
           <div className="meal-list">
-            <article><span className="meal-emoji breakfast">🥣</span><div className="meal-info"><strong>Greek yogurt & berries</strong><span>Breakfast · 8:12 AM</span></div><div className="meal-kcal"><strong>326</strong><span>kcal</span></div><ChevronRight size={18} /></article>
-            <article><span className="meal-emoji lunch">🥗</span><div className="meal-info"><strong>Mediterranean salad</strong><span>Lunch · 12:36 PM</span></div><div className="meal-kcal"><strong>540</strong><span>kcal</span></div><ChevronRight size={18} /></article>
+            {!loaded ? <p>Loading your diary…</p> : todaysMeals.length === 0 ? <p className="empty-diary">Nothing logged today. Add your first meal above.</p> : todaysMeals.map(meal => (
+              <article key={meal.id}><span className="meal-emoji lunch">🍽️</span><div className="meal-info"><strong>{meal.name}</strong><span>{new Date(meal.loggedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} · P {meal.protein}g · C {meal.carbs}g · F {meal.fat}g</span></div><div className="meal-kcal"><strong>{meal.calories}</strong><span>kcal</span></div><button className="delete-meal" onClick={() => removeMeal(meal.id)} aria-label={`Remove ${meal.name}`}><X size={18} /></button></article>
+            ))}
           </div>
         </section>
       </div>
