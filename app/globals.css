@@ -189,3 +189,16 @@ footer p { margin: 0; color: var(--muted); font-size: 11px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* Interactive meal diary */
+.entry-fields { display: grid; gap: 12px; margin-top: 16px; }
+.entry-fields label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.entry-fields input { width: 100%; min-width: 0; padding: 10px 11px; border: 1px solid var(--line); border-radius: 9px; background: white; color: var(--ink); font-size: 14px; }
+.entry-fields input:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
+.entry-numbers { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+.entry-notice { margin: 12px 0 0; color: var(--green-dark); font-size: 12px; text-align: center; }
+.empty-diary { grid-column: 1 / -1; padding: 24px; margin: 0; border: 1px dashed var(--line); border-radius: 14px; color: var(--muted); text-align: center; background: white; }
+.delete-meal { border: 0; padding: 6px; border-radius: 8px; background: transparent; color: #8d9990; cursor: pointer; }
+.delete-meal:hover { color: #b33b3b; background: #fff0f0; }
+.text-button { text-decoration: none; }
+.log-button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
