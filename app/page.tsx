@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, DragEvent, FormEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
 import {
   Camera,
   Check,
@@ -66,6 +66,20 @@ type BetaSessionState = {
   error: string;
 };
 
+type BetaSessionResponse = {
+  enabled?: boolean;
+  authenticated?: boolean;
+  testerId?: string | null;
+  analysesPerDay?: number;
+  error?: string | { message?: string };
+};
+
+declare global {
+  interface Window {
+    __macroSnapInvitationToken?: string;
+  }
+}
+
 
 
 function ProgressRing({ value, max }: { value: number; max: number }) {
@@ -97,6 +111,7 @@ function ProgressRing({ value, max }: { value: number; max: number }) {
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const lastAnalysisRef = useRef<{ fileKey: string; value: AnalysisResponse } | null>(null);
+  const betaBootstrapRef = useRef<Promise<{ response: Response; value: BetaSessionResponse; invitationRedemption: boolean }> | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [fileName, setFileName] = useState("");
@@ -112,8 +127,6 @@ export default function Home() {
   const [fat, setFat] = useState("0");
   const [notice, setNotice] = useState("");
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
-  const [betaCode, setBetaCode] = useState("");
-  const [authenticating, setAuthenticating] = useState(false);
   const [betaSession, setBetaSession] = useState<BetaSessionState>({
     checked: false,
     enabled: false,
@@ -146,17 +159,33 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
-    fetch("/api/beta/session", { cache: "no-store" })
-      .then(async (response) => ({ response, value: await response.json() }))
-      .then(({ response, value }) => {
+    if (!betaBootstrapRef.current) {
+      const invitationToken = window.__macroSnapInvitationToken;
+      delete window.__macroSnapInvitationToken;
+      const sessionRequest = invitationToken
+        ? fetch("/api/beta/session", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token: invitationToken }),
+          })
+        : fetch("/api/beta/session", { cache: "no-store" });
+      betaBootstrapRef.current = sessionRequest.then(async (response) => ({
+        response,
+        value: await response.json() as BetaSessionResponse,
+        invitationRedemption: Boolean(invitationToken),
+      }));
+    }
+
+    betaBootstrapRef.current
+      .then(({ response, value, invitationRedemption }) => {
         if (!active) return;
         setBetaSession({
           checked: true,
-          enabled: Boolean(value.enabled),
+          enabled: invitationRedemption || Boolean(value.enabled),
           authenticated: Boolean(value.authenticated),
           testerId: typeof value.testerId === "string" ? value.testerId : null,
           analysesPerDay: typeof value.analysesPerDay === "number" ? value.analysesPerDay : 10,
-          error: response.ok ? "" : value.error || "Private beta access is temporarily unavailable.",
+          error: response.ok ? "" : typeof value.error === "string" ? value.error : value.error?.message || "Private beta access is temporarily unavailable.",
         });
       })
       .catch(() => {
@@ -166,13 +195,63 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    async function redeemFragmentInvitation() {
+      const fragment = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+      const invitationToken = new URLSearchParams(fragment).get("invite");
+      if (!invitationToken) return;
+      window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
+
+      try {
+        const response = await fetch("/api/beta/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: invitationToken }),
+        });
+        const value = await response.json() as BetaSessionResponse;
+        if (!active) return;
+        if (!response.ok) {
+          setBetaSession(previous => previous.authenticated ? previous : {
+            ...previous,
+            checked: true,
+            enabled: true,
+            error: typeof value.error === "string" ? value.error : value.error?.message || "That invitation link is not valid.",
+          });
+          return;
+        }
+        setBetaSession({
+          checked: true,
+          enabled: true,
+          authenticated: true,
+          testerId: typeof value.testerId === "string" ? value.testerId : null,
+          analysesPerDay: typeof value.analysesPerDay === "number" ? value.analysesPerDay : 10,
+          error: "",
+        });
+      } catch {
+        if (active) setBetaSession(previous => previous.authenticated ? previous : {
+          ...previous,
+          checked: true,
+          enabled: true,
+          error: "Private beta access is temporarily unavailable.",
+        });
+      }
+    }
+
+    window.addEventListener("hashchange", redeemFragmentInvitation);
+    return () => {
+      active = false;
+      window.removeEventListener("hashchange", redeemFragmentInvitation);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!diaryStorageKey) return;
     let active = true;
-    setLoaded(false);
-    setMeals([]);
 
     queueMicrotask(() => {
       if (!active) return;
+      setLoaded(false);
+      setMeals([]);
 
       try {
         const raw = window.localStorage.getItem(diaryStorageKey);
@@ -198,37 +277,9 @@ export default function Home() {
     }
   }, [diaryStorageKey, loaded, meals]);
 
-  async function submitBetaCode(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setAuthenticating(true);
-    setBetaSession(previous => ({ ...previous, error: "" }));
-    try {
-      const response = await fetch("/api/beta/session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: betaCode }),
-      });
-      const value = await response.json();
-      if (!response.ok) throw new Error(value?.error?.message || "That beta access code is not valid.");
-      setBetaCode("");
-      setBetaSession({
-        checked: true,
-        enabled: true,
-        authenticated: true,
-        testerId: value.testerId,
-        analysesPerDay: value.analysesPerDay || 10,
-        error: "",
-      });
-    } catch (error) {
-      setBetaSession(previous => ({ ...previous, error: error instanceof Error ? error.message : "Beta access failed." }));
-    } finally {
-      setAuthenticating(false);
-    }
-  }
-
   async function leaveBeta() {
     await fetch("/api/beta/session", { method: "DELETE" }).catch(() => undefined);
-    setBetaSession(previous => ({ ...previous, authenticated: false, testerId: null, error: "" }));
+    setBetaSession(previous => ({ ...previous, authenticated: false, testerId: null, error: "Session ended. Ask for a new invitation link to return." }));
     setMeals([]);
     setLoaded(false);
   }
@@ -369,13 +420,8 @@ export default function Home() {
         <section className="access-card" aria-labelledby="beta-access-title">
           <span className="brand"><span className="brand-mark"><Leaf size={20} /></span>MacroSnap</span>
           <p className="eyebrow"><Sparkles size={15} /> Private beta</p>
-          <h1 id="beta-access-title">Your plate, by invitation.</h1>
-          <p>Enter your individual beta code to open MacroSnap. Your session stays private on this device.</p>
-          <form onSubmit={submitBetaCode}>
-            <label htmlFor="beta-code">Beta access code</label>
-            <input id="beta-code" type="password" autoComplete="one-time-code" value={betaCode} onChange={event => setBetaCode(event.target.value)} required maxLength={256} />
-            <button className="primary-button" type="submit" disabled={authenticating}>{authenticating ? "Checking…" : "Enter private beta"}</button>
-          </form>
+          <h1 id="beta-access-title">Invitation required.</h1>
+          <p>Open the individual invitation link you received. Invitation links can be redeemed once and establish a private session on this device.</p>
           <small>Each tester may run up to {betaSession.analysesPerDay} AI analyses per day.</small>
           {betaSession.error && <p className="access-error" role="alert">{betaSession.error}</p>}
         </section>

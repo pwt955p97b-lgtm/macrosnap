@@ -206,7 +206,7 @@ export async function POST(request: Request) {
       const token = cookieValue(request.headers.get("cookie"), BETA_SESSION_COOKIE);
       const session = verifyBetaSession(token);
       if (!session) {
-        return json({ error: { code: "BETA_SESSION_REQUIRED", message: "Your beta session has expired. Enter your access code again." } }, 401);
+        return json({ error: { code: "BETA_SESSION_REQUIRED", message: "Your beta session has expired. Ask for a new invitation link." } }, 401);
       }
       testerId = session.testerId;
     } catch (error) {

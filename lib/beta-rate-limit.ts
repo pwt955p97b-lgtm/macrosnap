@@ -39,6 +39,12 @@ if count == 1 then redis.call("EXPIRE", KEYS[1], ARGV[1]) end
 return count
 `;
 
+const REDEEM_INVITATION_SCRIPT = `
+local claimed = redis.call("SET", KEYS[1], ARGV[1], "NX")
+if claimed then return 1 end
+return 0
+`;
+
 let redisClient: Redis | null = null;
 
 function positiveInteger(value: string | undefined, fallback: number) {
@@ -125,6 +131,25 @@ export async function allowLoginAttempt(identifier: string, environment: Environ
       [LOGIN_WINDOW_SECONDS],
     ) as number;
     return { allowed: Number(count) <= LOGIN_ATTEMPT_LIMIT, retryAfter: LOGIN_WINDOW_SECONDS };
+  } catch (error) {
+    if (error instanceof DurableStoreUnavailableError) throw error;
+    throw new DurableStoreUnavailableError(error instanceof Error ? error.message : undefined);
+  }
+}
+
+export async function redeemInvitation(
+  testerId: string,
+  invitationHash: string,
+  environment: Environment = process.env,
+  client?: EvalClient,
+) {
+  try {
+    const result = await (client || redisFromEnvironment(environment)).eval(
+      REDEEM_INVITATION_SCRIPT,
+      [`macrosnap:beta:invitation:${invitationHash}`],
+      [testerId],
+    );
+    return Number(result) === 1;
   } catch (error) {
     if (error instanceof DurableStoreUnavailableError) throw error;
     throw new DurableStoreUnavailableError(error instanceof Error ? error.message : undefined);

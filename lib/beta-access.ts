@@ -25,23 +25,23 @@ export function aiAccessMode(environment: Environment = process.env): AiAccessMo
   return environment.MACROSNAP_AI_ENABLED === "true" ? "development" : "disabled";
 }
 
-export function hashBetaCode(code: string) {
-  return createHash("sha256").update(code, "utf8").digest("hex");
+export function hashInvitationToken(token: string) {
+  return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
-export function configuredBetaCodes(environment: Environment = process.env) {
-  const raw = environment.MACROSNAP_BETA_CODE_HASHES_JSON;
-  if (!raw) throw new BetaConfigurationError("Beta access codes are not configured.");
+export function configuredInvitations(environment: Environment = process.env) {
+  const raw = environment.MACROSNAP_BETA_INVITE_HASHES_JSON;
+  if (!raw) throw new BetaConfigurationError("Beta invitations are not configured.");
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new BetaConfigurationError("MACROSNAP_BETA_CODE_HASHES_JSON must be valid JSON.");
+    throw new BetaConfigurationError("MACROSNAP_BETA_INVITE_HASHES_JSON must be valid JSON.");
   }
 
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new BetaConfigurationError("Beta access codes must be a tester-to-hash object.");
+    throw new BetaConfigurationError("Beta invitations must be a tester-to-hash object.");
   }
 
   const entries = Object.entries(parsed as Record<string, unknown>);
@@ -49,14 +49,18 @@ export function configuredBetaCodes(environment: Environment = process.env) {
     throw new BetaConfigurationError("Configure between 1 and 100 beta testers.");
   }
 
-  const codes = new Map<string, string>();
+  const invitations = new Map<string, string>();
+  const uniqueHashes = new Set<string>();
   for (const [testerId, value] of entries) {
     if (!/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(testerId) || typeof value !== "string" || !/^[a-f0-9]{64}$/i.test(value)) {
-      throw new BetaConfigurationError("Beta tester IDs or code hashes are invalid.");
+      throw new BetaConfigurationError("Beta tester IDs or invitation hashes are invalid.");
     }
-    codes.set(testerId, value.toLowerCase());
+    const hash = value.toLowerCase();
+    if (uniqueHashes.has(hash)) throw new BetaConfigurationError("Each beta invitation hash must be unique.");
+    uniqueHashes.add(hash);
+    invitations.set(testerId, hash);
   }
-  return codes;
+  return invitations;
 }
 
 function sessionSecret(environment: Environment = process.env) {
@@ -73,17 +77,17 @@ function safeEqualText(left: string, right: string) {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-export function testerForBetaCode(code: string, environment: Environment = process.env) {
-  const candidate = hashBetaCode(code);
+export function testerForInvitationToken(token: string, environment: Environment = process.env) {
+  const candidate = hashInvitationToken(token);
   let match: string | null = null;
-  for (const [testerId, expected] of configuredBetaCodes(environment)) {
+  for (const [testerId, expected] of configuredInvitations(environment)) {
     if (safeEqualText(candidate, expected)) match = testerId;
   }
   return match;
 }
 
 export function createBetaSession(testerId: string, environment: Environment = process.env, now = Date.now()) {
-  if (!configuredBetaCodes(environment).has(testerId)) {
+  if (!configuredInvitations(environment).has(testerId)) {
     throw new BetaConfigurationError("Cannot create a session for an unknown tester.");
   }
   const payload = Buffer.from(JSON.stringify({
@@ -107,7 +111,7 @@ export function verifyBetaSession(token: string | undefined, environment: Enviro
     const value = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<string, unknown>;
     if (value.version !== 1 || typeof value.testerId !== "string" || typeof value.expiresAt !== "number") return null;
     if (!Number.isSafeInteger(value.expiresAt) || value.expiresAt <= now) return null;
-    if (!configuredBetaCodes(environment).has(value.testerId)) return null;
+    if (!configuredInvitations(environment).has(value.testerId)) return null;
     return { testerId: value.testerId, expiresAt: value.expiresAt };
   } catch {
     return null;

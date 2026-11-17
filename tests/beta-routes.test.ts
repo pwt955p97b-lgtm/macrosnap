@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { POST as analyze } from "../app/api/analyze-food/route";
 import { GET as getSession } from "../app/api/beta/session/route";
-import { BETA_SESSION_COOKIE, createBetaSession, hashBetaCode } from "../lib/beta-access";
+import { BETA_SESSION_COOKIE, createBetaSession, hashInvitationToken } from "../lib/beta-access";
 
 const managedNames = [
   "NODE_ENV",
   "VERCEL_ENV",
   "MACROSNAP_AI_ENABLED",
   "MACROSNAP_BETA_ENABLED",
-  "MACROSNAP_BETA_CODE_HASHES_JSON",
+  "MACROSNAP_BETA_INVITE_HASHES_JSON",
   "MACROSNAP_SESSION_SECRET",
 ] as const;
 
@@ -42,7 +42,7 @@ test("a beta preview rejects analysis without a signed session", async () => {
     NODE_ENV: "production",
     VERCEL_ENV: "preview",
     MACROSNAP_BETA_ENABLED: "true",
-    MACROSNAP_BETA_CODE_HASHES_JSON: JSON.stringify({ tester: hashBetaCode("a-long-random-code") }),
+    MACROSNAP_BETA_INVITE_HASHES_JSON: JSON.stringify({ tester: hashInvitationToken("a-long-random-invitation-token-for-tests") }),
     MACROSNAP_SESSION_SECRET: "a-preview-session-secret-that-is-longer-than-thirty-two-bytes",
   }, async () => {
     const response = await analyze(new Request("https://preview.example/api/analyze-food", {
@@ -59,7 +59,7 @@ test("the session endpoint recognizes a valid signed tester cookie", async () =>
     NODE_ENV: "production",
     VERCEL_ENV: "preview",
     MACROSNAP_BETA_ENABLED: "true",
-    MACROSNAP_BETA_CODE_HASHES_JSON: JSON.stringify({ tester: hashBetaCode("a-long-random-code") }),
+    MACROSNAP_BETA_INVITE_HASHES_JSON: JSON.stringify({ tester: hashInvitationToken("a-long-random-invitation-token-for-tests") }),
     MACROSNAP_SESSION_SECRET: "a-preview-session-secret-that-is-longer-than-thirty-two-bytes",
   };
   await withEnvironment(configuration, async () => {

@@ -21,7 +21,7 @@ The route accepts JPEG, PNG, and WebP files up to 6 MB. It checks file signature
 
 ## Private beta
 
-The beta adds individual high-entropy access codes, signed HttpOnly sessions, durable atomic usage counters, a hard limit of 10 AI analyses per tester per UTC day, and a configurable global daily cap. Redis credentials and all other secrets stay server-side. If the session, durable counter store, or OpenAI configuration is unavailable, beta AI requests fail closed.
+The beta adds single-use individual invitation links, signed HttpOnly sessions, durable atomic usage counters, a hard limit of 10 AI analyses per tester per UTC day, and a configurable global daily cap. Invitation tokens use URL fragments so they never reach HTTP access logs and are removed from the address bar before redemption. Redis credentials and all other secrets stay server-side. If the session, durable counter store, or OpenAI configuration is unavailable, beta AI requests fail closed.
 
 See [docs/private-beta-vercel.md](docs/private-beta-vercel.md) for code generation, environment variables, Vercel Shareable Links, and the release checklist. No Redis database is provisioned by this repository; choose a no-cost plan and do not enable billing without approval.
 

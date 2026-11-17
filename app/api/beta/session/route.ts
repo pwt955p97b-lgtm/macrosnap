@@ -6,11 +6,12 @@ import {
   betaSessionCookieOptions,
   cookieValue,
   createBetaSession,
+  hashInvitationToken,
   sameOrigin,
-  testerForBetaCode,
+  testerForInvitationToken,
   verifyBetaSession,
 } from "@/lib/beta-access";
-import { allowLoginAttempt, DurableStoreUnavailableError, TESTER_DAILY_ANALYSIS_LIMIT } from "@/lib/beta-rate-limit";
+import { allowLoginAttempt, DurableStoreUnavailableError, redeemInvitation, TESTER_DAILY_ANALYSIS_LIMIT } from "@/lib/beta-rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -64,21 +65,28 @@ export async function POST(request: Request) {
     const attempt = await allowLoginAttempt(clientIdentifier(request));
     if (!attempt.allowed) {
       return json(
-        { error: { code: "LOGIN_RATE_LIMITED", message: "Too many code attempts. Try again in 15 minutes." } },
+        { error: { code: "LOGIN_RATE_LIMITED", message: "Too many invitation attempts. Try again in 15 minutes." } },
         429,
         { "Retry-After": String(attempt.retryAfter) },
       );
     }
 
-    const body = await request.json() as { code?: unknown };
-    const code = typeof body.code === "string" ? body.code.trim() : "";
-    if (!code || code.length > 256) {
-      return json({ error: { code: "INVALID_CODE", message: "That beta access code is not valid." } }, 401);
+    const body = await request.json() as { token?: unknown };
+    const invitationToken = typeof body.token === "string" ? body.token.trim() : "";
+    if (invitationToken.length < 32 || invitationToken.length > 256) {
+      return json({ error: { code: "INVALID_INVITATION", message: "That invitation link is not valid." } }, 401);
     }
 
-    const testerId = testerForBetaCode(code);
+    const testerId = testerForInvitationToken(invitationToken);
     if (!testerId) {
-      return json({ error: { code: "INVALID_CODE", message: "That beta access code is not valid." } }, 401);
+      return json({ error: { code: "INVALID_INVITATION", message: "That invitation link is not valid." } }, 401);
+    }
+
+    const sessionToken = createBetaSession(testerId);
+    const redeemed = await redeemInvitation(testerId, hashInvitationToken(invitationToken));
+    const currentSession = sessionFromRequest(request);
+    if (!redeemed && currentSession?.testerId !== testerId) {
+      return json({ error: { code: "INVITATION_REDEEMED", message: "That invitation link has already been used. Ask for a new invitation." } }, 410);
     }
 
     const response = json({
@@ -89,7 +97,7 @@ export async function POST(request: Request) {
     });
     response.cookies.set({
       name: BETA_SESSION_COOKIE,
-      value: createBetaSession(testerId),
+      value: sessionToken,
       ...betaSessionCookieOptions(),
     });
     return response;
@@ -98,7 +106,7 @@ export async function POST(request: Request) {
       console.error("[beta-session] unavailable", error.message);
       return json({ error: { code: "BETA_UNAVAILABLE", message: "Private beta access is temporarily unavailable." } }, 503);
     }
-    return json({ error: { code: "INVALID_REQUEST", message: "Enter a beta access code." } }, 400);
+    return json({ error: { code: "INVALID_REQUEST", message: "Open a valid beta invitation link." } }, 400);
   }
 }
 

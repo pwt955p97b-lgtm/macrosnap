@@ -41,12 +41,6 @@ button { color: inherit; }
 .access-card .eyebrow { margin-bottom: 12px; }
 .access-card h1 { margin-bottom: 14px; font-size: clamp(34px, 9vw, 48px); letter-spacing: -2.4px; }
 .access-card > p:not(.eyebrow):not(.access-error) { color: var(--muted); line-height: 1.6; }
-.access-card form { margin-top: 26px; display: grid; gap: 10px; }
-.access-card label { color: var(--ink); font-size: 12px; font-weight: 800; }
-.access-card input { width: 100%; padding: 13px 14px; border: 1px solid #cbd5ca; border-radius: 11px; background: #fbfcfa; }
-.access-card input:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
-.access-card .primary-button { width: 100%; margin-top: 4px; }
-.access-card .primary-button:disabled { opacity: .65; cursor: wait; }
 .access-card small { display: block; margin-top: 17px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .access-error { margin: 14px 0 0; padding: 10px 11px; border-radius: 9px; background: #fff0f0; color: #9e3434; font-size: 12px; }
 

@@ -3,24 +3,27 @@ import test from "node:test";
 import {
   aiAccessMode,
   BETA_SESSION_COOKIE,
+  BetaConfigurationError,
   betaSessionCookieOptions,
+  configuredInvitations,
   cookieValue,
   createBetaSession,
-  hashBetaCode,
+  hashInvitationToken,
   sameOrigin,
-  testerForBetaCode,
+  testerForInvitationToken,
   verifyBetaSession,
 } from "../lib/beta-access";
 import {
   allowLoginAttempt,
   consumeAnalysisQuota,
   DEFAULT_GLOBAL_DAILY_ANALYSIS_LIMIT,
+  redeemInvitation,
   TESTER_DAILY_ANALYSIS_LIMIT,
 } from "../lib/beta-rate-limit";
 
-const code = "high-entropy-test-code-that-is-not-used-in-production";
+const invitationToken = "high-entropy-test-invitation-token-that-is-not-used-in-production";
 const environment = {
-  MACROSNAP_BETA_CODE_HASHES_JSON: JSON.stringify({ "tester-01": hashBetaCode(code) }),
+  MACROSNAP_BETA_INVITE_HASHES_JSON: JSON.stringify({ "tester-01": hashInvitationToken(invitationToken) }),
   MACROSNAP_SESSION_SECRET: "a-test-session-secret-that-is-longer-than-thirty-two-bytes",
 };
 
@@ -31,16 +34,29 @@ test("production remains disabled while protected previews can use beta mode", (
   assert.equal(aiAccessMode({ NODE_ENV: "development", MACROSNAP_AI_ENABLED: "true" }), "development");
 });
 
-test("individual codes create signed, expiring, revocable sessions", () => {
+test("individual invitations create signed, expiring, revocable sessions", () => {
   const now = Date.UTC(2026, 10, 16);
-  assert.equal(testerForBetaCode(code, environment), "tester-01");
-  assert.equal(testerForBetaCode(`${code}-wrong`, environment), null);
+  assert.equal(testerForInvitationToken(invitationToken, environment), "tester-01");
+  assert.equal(testerForInvitationToken(`${invitationToken}-wrong`, environment), null);
 
   const token = createBetaSession("tester-01", environment, now);
   assert.deepEqual(verifyBetaSession(token, environment, now + 1000)?.testerId, "tester-01");
   assert.equal(verifyBetaSession(`${token.slice(0, -1)}x`, environment, now + 1000), null);
   assert.equal(verifyBetaSession(token, environment, now + 8 * 24 * 60 * 60 * 1000), null);
-  assert.equal(verifyBetaSession(token, { ...environment, MACROSNAP_BETA_CODE_HASHES_JSON: JSON.stringify({ other: hashBetaCode("other-code") }) }, now + 1000), null);
+  assert.equal(verifyBetaSession(token, { ...environment, MACROSNAP_BETA_INVITE_HASHES_JSON: JSON.stringify({ other: hashInvitationToken("another-high-entropy-invitation-token") }) }, now + 1000), null);
+});
+
+test("rejects duplicate invitation tokens assigned to different testers", () => {
+  const duplicateHash = hashInvitationToken(invitationToken);
+  assert.throws(
+    () => configuredInvitations({
+      MACROSNAP_BETA_INVITE_HASHES_JSON: JSON.stringify({
+        "tester-01": duplicateHash,
+        "tester-02": duplicateHash,
+      }),
+    }),
+    BetaConfigurationError,
+  );
 });
 
 test("reads only the named cookie and enforces same-origin requests", () => {
@@ -75,11 +91,16 @@ test("interprets atomic tester and global quota decisions", async () => {
   assert.equal((await consumeAnalysisQuota("tester-01", { MACROSNAP_BETA_GLOBAL_DAILY_LIMIT: "100" }, now, globalDeniedClient)).reason, "global");
 });
 
-test("durably limits repeated beta-code attempts", async () => {
+test("durably limits repeated invitation attempts", async () => {
   const allowedClient = { eval: async () => 10 };
   const deniedClient = { eval: async () => 11 };
   assert.equal((await allowLoginAttempt("192.0.2.1", {}, allowedClient)).allowed, true);
   assert.equal((await allowLoginAttempt("192.0.2.1", {}, deniedClient)).allowed, false);
+});
+
+test("atomically accepts an invitation only once", async () => {
+  assert.equal(await redeemInvitation("tester-01", hashInvitationToken(invitationToken), {}, { eval: async () => 1 }), true);
+  assert.equal(await redeemInvitation("tester-01", hashInvitationToken(invitationToken), {}, { eval: async () => 0 }), false);
 });
 
 test("rejects an invalid global cap instead of silently widening it", async () => {
