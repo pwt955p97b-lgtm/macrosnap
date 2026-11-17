@@ -1,6 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import OpenAI from "openai";
 import {
+  aiAccessMode,
+  BETA_SESSION_COOKIE,
+  BetaConfigurationError,
+  cookieValue,
+  sameOrigin,
+  verifyBetaSession,
+} from "@/lib/beta-access";
+import { consumeAnalysisQuota, DurableStoreUnavailableError } from "@/lib/beta-rate-limit";
+import {
   emptyUsage,
   FOOD_ANALYSIS_MODEL,
   ImageValidationError,
@@ -18,7 +27,7 @@ export const dynamic = "force-dynamic";
 
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const RATE_WINDOW_MS = 10 * 60 * 1000;
-const RATE_LIMIT = 5;
+const RATE_LIMIT = 12;
 const CACHE_LIMIT = 100;
 
 type AnalysisPayload = {
@@ -57,26 +66,15 @@ function json(body: unknown, status = 200, headers?: HeadersInit) {
 }
 
 function clientIdentifier(request: Request) {
-  return request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+  return request.headers.get("x-vercel-forwarded-for")?.split(",")[0]?.trim()
+    || request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
     || request.headers.get("x-real-ip")
     || "local";
 }
 
-function sameOrigin(request: Request) {
-  const origin = request.headers.get("origin");
-  if (!origin) return true;
-
-  try {
-    const requestHost = request.headers.get("x-forwarded-host") || request.headers.get("host");
-    return Boolean(requestHost && new URL(origin).host === requestHost);
-  } catch {
-    return false;
-  }
-}
-
-function applyRateLimit(request: Request) {
+function applyRateLimit(request: Request, testerId?: string | null) {
   const now = Date.now();
-  const identifier = clientIdentifier(request);
+  const identifier = testerId ? `tester:${testerId}` : clientIdentifier(request);
   const current = state.clients.get(identifier);
 
   if (!current || current.resetAt <= now) {
@@ -184,21 +182,40 @@ async function requestAnalysis(bytes: Uint8Array, mediaType: string): Promise<St
 }
 
 export async function POST(request: Request) {
-  if (process.env.NODE_ENV === "production") {
+  const accessMode = aiAccessMode();
+  if (accessMode === "disabled") {
+    const productionLocked = process.env.VERCEL_ENV === "production"
+      || (process.env.NODE_ENV === "production" && process.env.VERCEL_ENV !== "preview");
     return json({
       error: {
-        code: "ACCESS_CONTROL_REQUIRED",
-        message: "Photo analysis is unavailable until account access controls are implemented.",
+        code: productionLocked ? "PRODUCTION_AI_DISABLED" : "FEATURE_DISABLED",
+        message: productionLocked
+          ? "Photo analysis is disabled on the production deployment."
+          : "Photo analysis is not available yet.",
       },
     }, 403);
   }
 
-  if (process.env.MACROSNAP_AI_ENABLED !== "true") {
-    return json({ error: { code: "FEATURE_DISABLED", message: "Photo analysis is not available yet." } }, 403);
-  }
-
   if (!sameOrigin(request)) {
     return json({ error: { code: "INVALID_ORIGIN", message: "This request is not allowed." } }, 403);
+  }
+
+  let testerId: string | null = null;
+  if (accessMode === "beta") {
+    try {
+      const token = cookieValue(request.headers.get("cookie"), BETA_SESSION_COOKIE);
+      const session = verifyBetaSession(token);
+      if (!session) {
+        return json({ error: { code: "BETA_SESSION_REQUIRED", message: "Your beta session has expired. Enter your access code again." } }, 401);
+      }
+      testerId = session.testerId;
+    } catch (error) {
+      if (error instanceof BetaConfigurationError) {
+        console.error("[food-analysis] beta configuration unavailable", error.message);
+        return json({ error: { code: "BETA_UNAVAILABLE", message: "Private beta access is temporarily unavailable." } }, 503);
+      }
+      throw error;
+    }
   }
 
   if (!process.env.OPENAI_API_KEY) {
@@ -210,7 +227,7 @@ export async function POST(request: Request) {
     return json({ error: { code: "IMAGE_TOO_LARGE", message: "The image is larger than 6 MB." } }, 413);
   }
 
-  const rate = applyRateLimit(request);
+  const rate = applyRateLimit(request, testerId);
   if (!rate.allowed) {
     return json(
       { error: { code: "RATE_LIMITED", message: "Too many analyses. Try again in a few minutes." } },
@@ -256,6 +273,22 @@ export async function POST(request: Request) {
       } satisfies AnalysisPayload);
     }
 
+    if (testerId) {
+      const quota = await consumeAnalysisQuota(testerId);
+      if (!quota.allowed) {
+        const retryAfter = Math.max(1, Math.ceil((new Date(quota.resetsAt).getTime() - Date.now()) / 1000));
+        return json({
+          error: {
+            code: quota.reason === "tester" ? "BETA_DAILY_LIMIT" : "BETA_GLOBAL_LIMIT",
+            message: quota.reason === "tester"
+              ? "You have used today’s 10 photo analyses. Try again after the daily reset."
+              : "The private beta has reached its daily AI limit. Try again after the daily reset.",
+            resetsAt: quota.resetsAt,
+          },
+        }, 429, { "Retry-After": String(retryAfter) });
+      }
+    }
+
     const pending = requestAnalysis(bytes, mediaType);
     state.inFlight.set(hash, pending);
 
@@ -270,6 +303,16 @@ export async function POST(request: Request) {
   } catch (error) {
     if (error instanceof ImageValidationError) {
       return json({ error: { code: error.code, message: error.message } }, error.status);
+    }
+
+    if (error instanceof DurableStoreUnavailableError) {
+      console.error("[food-analysis] durable quota unavailable", error.message);
+      return json({
+        error: {
+          code: "BETA_STORE_UNAVAILABLE",
+          message: "Photo analysis is temporarily unavailable because usage limits cannot be verified.",
+        },
+      }, 503);
     }
 
     const status = error instanceof OpenAI.APIError && error.status === 429 ? 429 : 502;

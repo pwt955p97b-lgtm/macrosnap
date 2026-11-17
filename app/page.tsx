@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, useEffect, useRef, useState } from "react";
 import {
   Camera,
   Check,
@@ -8,6 +8,7 @@ import {
   Flame,
   ImagePlus,
   Leaf,
+  LogOut,
   Plus,
   ScanLine,
   Sparkles,
@@ -56,6 +57,15 @@ type Macro = {
   color: string;
 };
 
+type BetaSessionState = {
+  checked: boolean;
+  enabled: boolean;
+  authenticated: boolean;
+  testerId: string | null;
+  analysesPerDay: number;
+  error: string;
+};
+
 
 
 function ProgressRing({ value, max }: { value: number; max: number }) {
@@ -102,6 +112,20 @@ export default function Home() {
   const [fat, setFat] = useState("0");
   const [notice, setNotice] = useState("");
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
+  const [betaCode, setBetaCode] = useState("");
+  const [authenticating, setAuthenticating] = useState(false);
+  const [betaSession, setBetaSession] = useState<BetaSessionState>({
+    checked: false,
+    enabled: false,
+    authenticated: false,
+    testerId: null,
+    analysesPerDay: 10,
+    error: "",
+  });
+
+  const diaryStorageKey = betaSession.checked && (!betaSession.enabled || betaSession.authenticated)
+    ? betaSession.enabled && betaSession.testerId ? `${STORAGE_KEY}:${betaSession.testerId}` : STORAGE_KEY
+    : null;
 
   const today = new Date().toLocaleDateString("en-CA");
   const todaysMeals = meals.filter((meal) => new Date(meal.loggedAt).toLocaleDateString("en-CA") === today);
@@ -122,12 +146,36 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
+    fetch("/api/beta/session", { cache: "no-store" })
+      .then(async (response) => ({ response, value: await response.json() }))
+      .then(({ response, value }) => {
+        if (!active) return;
+        setBetaSession({
+          checked: true,
+          enabled: Boolean(value.enabled),
+          authenticated: Boolean(value.authenticated),
+          testerId: typeof value.testerId === "string" ? value.testerId : null,
+          analysesPerDay: typeof value.analysesPerDay === "number" ? value.analysesPerDay : 10,
+          error: response.ok ? "" : value.error || "Private beta access is temporarily unavailable.",
+        });
+      })
+      .catch(() => {
+        if (active) setBetaSession(previous => ({ ...previous, checked: true, error: "Private beta access is temporarily unavailable." }));
+      });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!diaryStorageKey) return;
+    let active = true;
+    setLoaded(false);
+    setMeals([]);
 
     queueMicrotask(() => {
       if (!active) return;
 
       try {
-        const raw = window.localStorage.getItem(STORAGE_KEY);
+        const raw = window.localStorage.getItem(diaryStorageKey);
         if (raw) {
           const parsed: unknown = JSON.parse(raw);
           if (Array.isArray(parsed)) setMeals(parsed.filter((m): m is Meal =>
@@ -141,14 +189,49 @@ export default function Home() {
     });
 
     return () => { active = false; };
-  }, []);
+  }, [diaryStorageKey]);
 
   useEffect(() => {
-    if (loaded) {
-      try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(meals)); }
+    if (loaded && diaryStorageKey) {
+      try { window.localStorage.setItem(diaryStorageKey, JSON.stringify(meals)); }
       catch { /* Storage may be disabled or full. */ }
     }
-  }, [loaded, meals]);
+  }, [diaryStorageKey, loaded, meals]);
+
+  async function submitBetaCode(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAuthenticating(true);
+    setBetaSession(previous => ({ ...previous, error: "" }));
+    try {
+      const response = await fetch("/api/beta/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: betaCode }),
+      });
+      const value = await response.json();
+      if (!response.ok) throw new Error(value?.error?.message || "That beta access code is not valid.");
+      setBetaCode("");
+      setBetaSession({
+        checked: true,
+        enabled: true,
+        authenticated: true,
+        testerId: value.testerId,
+        analysesPerDay: value.analysesPerDay || 10,
+        error: "",
+      });
+    } catch (error) {
+      setBetaSession(previous => ({ ...previous, error: error instanceof Error ? error.message : "Beta access failed." }));
+    } finally {
+      setAuthenticating(false);
+    }
+  }
+
+  async function leaveBeta() {
+    await fetch("/api/beta/session", { method: "DELETE" }).catch(() => undefined);
+    setBetaSession(previous => ({ ...previous, authenticated: false, testerId: null, error: "" }));
+    setMeals([]);
+    setLoaded(false);
+  }
 
   function logMeal() {
     const values = [calories, protein, carbs, fat].map(Number);
@@ -254,6 +337,9 @@ export default function Home() {
       const value = await response.json();
 
       if (!response.ok) {
+        if (response.status === 401 && value?.error?.code === "BETA_SESSION_REQUIRED") {
+          setBetaSession(previous => ({ ...previous, authenticated: false, testerId: null, error: value.error.message }));
+        }
         throw new Error(value?.error?.message || "We couldn't analyze this photo.");
       }
 
@@ -273,6 +359,30 @@ export default function Home() {
     }
   }
 
+  if (!betaSession.checked) {
+    return <main className="access-shell"><div className="access-card"><span className="brand"><span className="brand-mark"><Leaf size={20} /></span>MacroSnap</span><p>Checking private beta access…</p></div></main>;
+  }
+
+  if (betaSession.enabled && !betaSession.authenticated) {
+    return (
+      <main className="access-shell">
+        <section className="access-card" aria-labelledby="beta-access-title">
+          <span className="brand"><span className="brand-mark"><Leaf size={20} /></span>MacroSnap</span>
+          <p className="eyebrow"><Sparkles size={15} /> Private beta</p>
+          <h1 id="beta-access-title">Your plate, by invitation.</h1>
+          <p>Enter your individual beta code to open MacroSnap. Your session stays private on this device.</p>
+          <form onSubmit={submitBetaCode}>
+            <label htmlFor="beta-code">Beta access code</label>
+            <input id="beta-code" type="password" autoComplete="one-time-code" value={betaCode} onChange={event => setBetaCode(event.target.value)} required maxLength={256} />
+            <button className="primary-button" type="submit" disabled={authenticating}>{authenticating ? "Checking…" : "Enter private beta"}</button>
+          </form>
+          <small>Each tester may run up to {betaSession.analysesPerDay} AI analyses per day.</small>
+          {betaSession.error && <p className="access-error" role="alert">{betaSession.error}</p>}
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main>
       <header className="site-header">
@@ -282,7 +392,7 @@ export default function Home() {
             <span>MacroSnap</span>
           </a>
           <div className="streak"><Flame size={17} fill="currentColor" /> My food diary</div>
-          <span className="avatar" aria-label="Profile placeholder">MS</span>
+          {betaSession.enabled ? <button className="beta-exit" onClick={leaveBeta} title="End private beta session"><LogOut size={15} /> Leave beta</button> : <span className="avatar" aria-label="Profile placeholder">MS</span>}
         </div>
       </header>
 
