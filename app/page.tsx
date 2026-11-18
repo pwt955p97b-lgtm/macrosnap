@@ -8,6 +8,7 @@ import {
   Flame,
   ImagePlus,
   Leaf,
+  LogOut,
   Plus,
   ScanLine,
   Sparkles,
@@ -19,6 +20,35 @@ import {
 type Meal = { id: string; name: string; calories: number; protein: number; carbs: number; fat: number; loggedAt: string };
 const STORAGE_KEY = "macrosnap-meals-v1";
 const goals = { calories: 2400, protein: 165, carbs: 270, fat: 72 };
+const MAX_CLIENT_IMAGE_BYTES = 6 * 1024 * 1024;
+const CLIENT_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
+
+type AnalysisResponse = {
+  nutrition: {
+    foodName: string;
+    calories: number;
+    protein: number;
+    carbohydrates: number;
+    fat: number;
+    confidence: "low" | "medium" | "high";
+    uncertain: boolean;
+    uncertaintyNote: string | null;
+    assumptions: string[];
+  };
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    estimatedCostUsd: number | null;
+    pricingConfigured: boolean;
+  };
+  meta: {
+    model: string;
+    requestId: string;
+    cached: boolean;
+    generatedAt: string;
+  };
+};
 
 type Macro = {
   label: string;
@@ -26,6 +56,29 @@ type Macro = {
   unit: string;
   color: string;
 };
+
+type BetaSessionState = {
+  checked: boolean;
+  enabled: boolean;
+  authenticated: boolean;
+  testerId: string | null;
+  analysesPerDay: number;
+  error: string;
+};
+
+type BetaSessionResponse = {
+  enabled?: boolean;
+  authenticated?: boolean;
+  testerId?: string | null;
+  analysesPerDay?: number;
+  error?: string | { message?: string };
+};
+
+declare global {
+  interface Window {
+    __macroSnapInvitationToken?: string;
+  }
+}
 
 
 
@@ -57,7 +110,10 @@ function ProgressRing({ value, max }: { value: number; max: number }) {
 
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const lastAnalysisRef = useRef<{ fileKey: string; value: AnalysisResponse } | null>(null);
+  const betaBootstrapRef = useRef<Promise<{ response: Response; value: BetaSessionResponse; invitationRedemption: boolean }> | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [fileName, setFileName] = useState("");
   const [dragging, setDragging] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -70,6 +126,19 @@ export default function Home() {
   const [carbs, setCarbs] = useState("0");
   const [fat, setFat] = useState("0");
   const [notice, setNotice] = useState("");
+  const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
+  const [betaSession, setBetaSession] = useState<BetaSessionState>({
+    checked: false,
+    enabled: false,
+    authenticated: false,
+    testerId: null,
+    analysesPerDay: 10,
+    error: "",
+  });
+
+  const diaryStorageKey = betaSession.checked && (!betaSession.enabled || betaSession.authenticated)
+    ? betaSession.enabled && betaSession.testerId ? `${STORAGE_KEY}:${betaSession.testerId}` : STORAGE_KEY
+    : null;
 
   const today = new Date().toLocaleDateString("en-CA");
   const todaysMeals = meals.filter((meal) => new Date(meal.loggedAt).toLocaleDateString("en-CA") === today);
@@ -90,12 +159,102 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
+    if (!betaBootstrapRef.current) {
+      const invitationToken = window.__macroSnapInvitationToken;
+      delete window.__macroSnapInvitationToken;
+      const sessionRequest = invitationToken
+        ? fetch("/api/beta/session", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token: invitationToken }),
+          })
+        : fetch("/api/beta/session", { cache: "no-store" });
+      betaBootstrapRef.current = sessionRequest.then(async (response) => ({
+        response,
+        value: await response.json() as BetaSessionResponse,
+        invitationRedemption: Boolean(invitationToken),
+      }));
+    }
+
+    betaBootstrapRef.current
+      .then(({ response, value, invitationRedemption }) => {
+        if (!active) return;
+        setBetaSession({
+          checked: true,
+          enabled: invitationRedemption || Boolean(value.enabled),
+          authenticated: Boolean(value.authenticated),
+          testerId: typeof value.testerId === "string" ? value.testerId : null,
+          analysesPerDay: typeof value.analysesPerDay === "number" ? value.analysesPerDay : 10,
+          error: response.ok ? "" : typeof value.error === "string" ? value.error : value.error?.message || "Private beta access is temporarily unavailable.",
+        });
+      })
+      .catch(() => {
+        if (active) setBetaSession(previous => ({ ...previous, checked: true, error: "Private beta access is temporarily unavailable." }));
+      });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    async function redeemFragmentInvitation() {
+      const fragment = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+      const invitationToken = new URLSearchParams(fragment).get("invite");
+      if (!invitationToken) return;
+      window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
+
+      try {
+        const response = await fetch("/api/beta/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: invitationToken }),
+        });
+        const value = await response.json() as BetaSessionResponse;
+        if (!active) return;
+        if (!response.ok) {
+          setBetaSession(previous => previous.authenticated ? previous : {
+            ...previous,
+            checked: true,
+            enabled: true,
+            error: typeof value.error === "string" ? value.error : value.error?.message || "That invitation link is not valid.",
+          });
+          return;
+        }
+        setBetaSession({
+          checked: true,
+          enabled: true,
+          authenticated: true,
+          testerId: typeof value.testerId === "string" ? value.testerId : null,
+          analysesPerDay: typeof value.analysesPerDay === "number" ? value.analysesPerDay : 10,
+          error: "",
+        });
+      } catch {
+        if (active) setBetaSession(previous => previous.authenticated ? previous : {
+          ...previous,
+          checked: true,
+          enabled: true,
+          error: "Private beta access is temporarily unavailable.",
+        });
+      }
+    }
+
+    window.addEventListener("hashchange", redeemFragmentInvitation);
+    return () => {
+      active = false;
+      window.removeEventListener("hashchange", redeemFragmentInvitation);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!diaryStorageKey) return;
+    let active = true;
 
     queueMicrotask(() => {
       if (!active) return;
+      setLoaded(false);
+      setMeals([]);
 
       try {
-        const raw = window.localStorage.getItem(STORAGE_KEY);
+        const raw = window.localStorage.getItem(diaryStorageKey);
         if (raw) {
           const parsed: unknown = JSON.parse(raw);
           if (Array.isArray(parsed)) setMeals(parsed.filter((m): m is Meal =>
@@ -109,14 +268,21 @@ export default function Home() {
     });
 
     return () => { active = false; };
-  }, []);
+  }, [diaryStorageKey]);
 
   useEffect(() => {
-    if (loaded) {
-      try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(meals)); }
+    if (loaded && diaryStorageKey) {
+      try { window.localStorage.setItem(diaryStorageKey, JSON.stringify(meals)); }
       catch { /* Storage may be disabled or full. */ }
     }
-  }, [loaded, meals]);
+  }, [diaryStorageKey, loaded, meals]);
+
+  async function leaveBeta() {
+    await fetch("/api/beta/session", { method: "DELETE" }).catch(() => undefined);
+    setBetaSession(previous => ({ ...previous, authenticated: false, testerId: null, error: "Session ended. Ask for a new invitation link to return." }));
+    setMeals([]);
+    setLoaded(false);
+  }
 
   function logMeal() {
     const values = [calories, protein, carbs, fat].map(Number);
@@ -139,11 +305,26 @@ export default function Home() {
   }, [preview]);
 
   function selectFile(file?: File) {
-    if (!file || !file.type.startsWith("image/")) return;
+    if (!file) return;
+
+    if (!CLIENT_IMAGE_TYPES.includes(file.type)) {
+      setNotice("Choose a JPEG, PNG, or WebP image.");
+      if (inputRef.current) inputRef.current.value = "";
+      return;
+    }
+
+    if (file.size > MAX_CLIENT_IMAGE_BYTES) {
+      setNotice("Choose an image smaller than 6 MB.");
+      if (inputRef.current) inputRef.current.value = "";
+      return;
+    }
+
     if (preview) URL.revokeObjectURL(preview);
     setPreview(URL.createObjectURL(file));
+    setSelectedFile(file);
     setFileName(file.name);
     setAnalyzed(false);
+    setAnalysis(null);
     setNotice("");
   }
 
@@ -160,19 +341,92 @@ export default function Home() {
   function clearPhoto() {
     if (preview) URL.revokeObjectURL(preview);
     setPreview(null);
+    setSelectedFile(null);
     setFileName("");
     setAnalyzed(false);
+    setAnalysis(null);
+    setNotice("");
     if (inputRef.current) inputRef.current.value = "";
   }
 
-  function analyzePhoto() {
-    setAnalyzing(true);
-    // AI analysis is not connected yet: show an editable manual entry instead.
-    setMealName("");
-    setCalories("0"); setProtein("0"); setCarbs("0"); setFat("0");
+  function applyAnalysis(value: AnalysisResponse) {
+    setMealName(value.nutrition.foodName);
+    setCalories(String(value.nutrition.calories));
+    setProtein(String(value.nutrition.protein));
+    setCarbs(String(value.nutrition.carbohydrates));
+    setFat(String(value.nutrition.fat));
+    setAnalysis(value);
     setAnalyzed(true);
-    setAnalyzing(false);
-    setNotice("AI photo analysis is coming next. Enter your meal estimates to save it.");
+  }
+
+  async function analyzePhoto() {
+    if (!selectedFile) {
+      setNotice("Choose a food photo first.");
+      return;
+    }
+
+    const fileKey = `${selectedFile.name}:${selectedFile.size}:${selectedFile.lastModified}:${selectedFile.type}`;
+    if (lastAnalysisRef.current?.fileKey === fileKey) {
+      applyAnalysis(lastAnalysisRef.current.value);
+      setNotice("Reused the previous result for this photo. Review it before logging.");
+      return;
+    }
+
+    setAnalyzing(true);
+    setNotice("");
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 35_000);
+
+    try {
+      const formData = new FormData();
+      formData.append("image", selectedFile);
+      const response = await fetch("/api/analyze-food", {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+      });
+      const value = await response.json();
+
+      if (!response.ok) {
+        if (response.status === 401 && value?.error?.code === "BETA_SESSION_REQUIRED") {
+          setBetaSession(previous => ({ ...previous, authenticated: false, testerId: null, error: value.error.message }));
+        }
+        throw new Error(value?.error?.message || "We couldn't analyze this photo.");
+      }
+
+      const result = value as AnalysisResponse;
+      lastAnalysisRef.current = { fileKey, value: result };
+      applyAnalysis(result);
+      setNotice(result.nutrition.uncertain
+        ? "This estimate is uncertain. Check the assumptions and edit anything that looks wrong."
+        : "Estimate ready. Review and edit it before adding the meal.");
+    } catch (error) {
+      setNotice(error instanceof DOMException && error.name === "AbortError"
+        ? "Analysis took too long. Please try again."
+        : error instanceof Error ? error.message : "We couldn't analyze this photo.");
+    } finally {
+      window.clearTimeout(timeout);
+      setAnalyzing(false);
+    }
+  }
+
+  if (!betaSession.checked) {
+    return <main className="access-shell"><div className="access-card"><span className="brand"><span className="brand-mark"><Leaf size={20} /></span>MacroSnap</span><p>Checking private beta access…</p></div></main>;
+  }
+
+  if (betaSession.enabled && !betaSession.authenticated) {
+    return (
+      <main className="access-shell">
+        <section className="access-card" aria-labelledby="beta-access-title">
+          <span className="brand"><span className="brand-mark"><Leaf size={20} /></span>MacroSnap</span>
+          <p className="eyebrow"><Sparkles size={15} /> Private beta</p>
+          <h1 id="beta-access-title">Invitation required.</h1>
+          <p>Open the individual invitation link you received. Invitation links can be redeemed once and establish a private session on this device.</p>
+          <small>Each tester may run up to {betaSession.analysesPerDay} AI analyses per day.</small>
+          {betaSession.error && <p className="access-error" role="alert">{betaSession.error}</p>}
+        </section>
+      </main>
+    );
   }
 
   return (
@@ -184,7 +438,7 @@ export default function Home() {
             <span>MacroSnap</span>
           </a>
           <div className="streak"><Flame size={17} fill="currentColor" /> My food diary</div>
-          <span className="avatar" aria-label="Profile placeholder">MS</span>
+          {betaSession.enabled ? <button className="beta-exit" onClick={leaveBeta} title="End private beta session"><LogOut size={15} /> Leave beta</button> : <span className="avatar" aria-label="Profile placeholder">MS</span>}
         </div>
       </header>
 
@@ -211,7 +465,7 @@ export default function Home() {
               <Camera className="heading-icon" size={24} />
             </div>
 
-            <input ref={inputRef} className="visually-hidden" type="file" accept="image/*" capture="environment" onChange={onInput} />
+            <input ref={inputRef} className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" onChange={onInput} />
 
             {preview ? (
               <div className="preview-area">
@@ -235,13 +489,13 @@ export default function Home() {
                 <button className="primary-button" onClick={() => inputRef.current?.click()}>
                   <Camera size={18} /> Choose photo
                 </button>
-                <span className="file-hint">JPG, PNG, or HEIC · up to 10 MB</span>
+                <span className="file-hint">JPG, PNG, or WebP · up to 6 MB</span>
               </div>
             )}
 
             {preview && (
               <button className="analyze-button" onClick={analyzePhoto} disabled={analyzing}>
-                <ScanLine size={19} /> {analyzing ? "Preparing…" : analyzed ? "Reset estimate" : "Enter nutrition"}
+                <ScanLine size={19} /> {analyzing ? "Analyzing securely…" : analyzed ? "Analyze again" : "Analyze meal"}
               </button>
             )}
           </section>
@@ -258,7 +512,7 @@ export default function Home() {
             <div className={`result-content ${analyzed ? "fresh-result" : ""}`}>
               <div className="meal-title">
                 <span className="meal-icon"><Utensils size={21} /></span>
-                <div><strong>{analyzed ? "Log your meal" : "No meal selected yet"}</strong><span>{analyzed ? "Enter nutrition manually · AI coming soon" : "Choose a photo to get started"}</span></div>
+                <div><strong>{analyzed ? "Review your meal" : "No meal selected yet"}</strong><span>{analyzed ? "Edit any estimate before logging" : "Choose a photo or add a meal manually"}</span></div>
               </div>
               {analyzed && <div className="entry-fields">
                 <label>Meal name<input value={mealName} maxLength={100} onChange={e => setMealName(e.target.value)} placeholder="e.g. Grilled chicken and rice" /></label>
@@ -281,8 +535,24 @@ export default function Home() {
                   </div>
                 ))}
               </div>
+              {analysis && <div className={`analysis-review ${analysis.nutrition.uncertain ? "is-uncertain" : ""}`}>
+                <div className="analysis-summary">
+                  <span className={`confidence-badge confidence-${analysis.nutrition.confidence}`}>{analysis.nutrition.confidence} confidence</span>
+                  <span>{analysis.meta.cached ? "Reused result · no new tokens" : `${analysis.usage.totalTokens.toLocaleString()} tokens`}</span>
+                </div>
+                {analysis.nutrition.uncertaintyNote && <p>{analysis.nutrition.uncertaintyNote}</p>}
+                {analysis.nutrition.assumptions.length > 0 && <div className="assumptions">
+                  <strong>Check these assumptions</strong>
+                  <ul>{analysis.nutrition.assumptions.map((assumption) => <li key={assumption}>{assumption}</li>)}</ul>
+                </div>}
+                <small>
+                  {analysis.usage.estimatedCostUsd === null
+                    ? "Cost estimate unavailable until current model pricing is configured."
+                    : `Estimated API cost: $${analysis.usage.estimatedCostUsd.toFixed(6)}`}
+                </small>
+              </div>}
               <button className="log-button" onClick={logMeal} disabled={!analyzed || !loaded}><Plus size={18} /> Add to today&apos;s log</button>
-              <p className="mock-note"><Sparkles size={13} /> Manual nutrition entry · no AI estimate yet</p>
+              <p className="mock-note"><Sparkles size={13} /> Estimates can be wrong. Review before logging.</p>
               {notice && <p className="entry-notice" role="status">{notice}</p>}
             </div>
           </section>
@@ -314,7 +584,7 @@ export default function Home() {
         </section>
 
         <section className="recent-section" id="diary">
-          <div className="section-title compact"><div><p className="eyebrow">Today&apos;s log</p><h2>Recent meals</h2></div><button className="add-meal" onClick={() => { setAnalyzed(true); setMealName(""); setCalories("0"); setProtein("0"); setCarbs("0"); setFat("0"); document.getElementById("result-title")?.scrollIntoView({ behavior: "smooth" }); }}><Plus size={17} /> Add meal</button></div>
+          <div className="section-title compact"><div><p className="eyebrow">Today&apos;s log</p><h2>Recent meals</h2></div><button className="add-meal" onClick={() => { setAnalyzed(true); setAnalysis(null); setMealName(""); setCalories("0"); setProtein("0"); setCarbs("0"); setFat("0"); setNotice("Enter nutrition manually, then review it before logging."); document.getElementById("result-title")?.scrollIntoView({ behavior: "smooth" }); }}><Plus size={17} /> Add meal</button></div>
           <div className="meal-list">
             {!loaded ? <p>Loading your diary…</p> : todaysMeals.length === 0 ? <p className="empty-diary">Nothing logged today. Add your first meal above.</p> : todaysMeals.map(meal => (
               <article key={meal.id}><span className="meal-emoji lunch">🍽️</span><div className="meal-info"><strong>{meal.name}</strong><span>{new Date(meal.loggedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} · P {meal.protein}g · C {meal.carbs}g · F {meal.fat}g</span></div><div className="meal-kcal"><strong>{meal.calories}</strong><span>kcal</span></div><button className="delete-meal" onClick={() => removeMeal(meal.id)} aria-label={`Remove ${meal.name}`}><X size={18} /></button></article>
